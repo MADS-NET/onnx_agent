@@ -2,15 +2,22 @@
   "name": "onnx_agent",
   "requirements": {
     "Common": {
-      "note": ["Requires MADS 2.1.0 or later"]
+      "note": [
+        "Requires MADS 2.2.0 or later",
+        "OpenCV must be installed for camera mode (see [OpenCV](https://opencv.org/))"
+      ]
     },
     "Windows": {
       "note": ["Requires Windows 11 or later"],
-      "commands": []
+      "commands": [
+        "winget install OpenCV.OpenCV"
+      ]
     },
     "Linux": {
       "note": ["Requires Ubuntu 22.04 or later"],
-      "commands": []
+      "commands": [
+        "sudo apt install libopencv-dev"
+      ]
     },
     "macOS": {
       "note": [
@@ -18,8 +25,8 @@
         "You might need to remove the quarantine protection on the binaries once installed"
       ],
       "commands": [
-        "xattr -d com.apple.quarantine $(mads -p)/bin/mads-onnx-filter",
-        "xattr -d com.apple.quarantine $(mads -p)/bin/mads-onnx-source",
+        "brew install opencv",
+        "xattr -d com.apple.quarantine $(mads -p)/bin/mads-onnx-*",
         "xattr -d com.apple.quarantine $(mads -p)/lib/libonnxruntime.dylib"
       ]
     }
