@@ -1,0 +1,31 @@
+# Build
+/*build*/
+*.build/
+
+# Downloaded archives and models
+*.tgz
+*.zip
+*.onnx
+*.ort
+
+# Generated / downloaded example artifacts (not committed)
+examples/chronos/chronos_input.json
+
+# ImageNet example — model and sample images are downloaded, not committed
+examples/imagenet/*.onnx
+examples/imagenet/sample_*.jpg
+examples/imagenet/sample_*.png
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.vscode/
+.idea/
+.clangd/
+compile_commands.json
+
+# CMake
+CMakeUserPresets.json

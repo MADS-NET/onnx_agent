@@ -1,0 +1,330 @@
+name: Build and release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*.*.*'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-22.04
+            package: linux-x86_64
+            mads_asset: "*Linux-x86_64.tar.gz"
+            ort_platform: linux-x64
+
+          - name: Linux aarch64
+            os: ubuntu-22.04-arm
+            package: linux-aarch64
+            mads_asset: "*Linux-aarch64.tar.gz"
+            ort_platform: linux-aarch64
+
+          - name: macOS arm64
+            os: macos-15
+            package: macos-arm64
+            mads_asset: "*Darwin-universal.sh"
+
+          - name: Windows x64
+            os: windows-2022
+            package: windows-x64
+            mads_asset: "*Windows-AMD64.exe"
+
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v6
+        with:
+          # Fetch full history so git describe --tags works for VERSION
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libopencv-dev
+
+      - name: Set up MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      # ── MADS installation ──────────────────────────────────────────────────
+      - name: Install MADS on Linux
+        if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/mads-release" "$RUNNER_TEMP/mads"
+          curl -fsSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "User-Agent: mads-onnx-ci" \
+            "https://api.github.com/repos/pbosetti/MADS/releases/latest" \
+            -o "$RUNNER_TEMP/mads-release/latest.json"
+
+          asset_url="$(
+            python3 - "$RUNNER_TEMP/mads-release/latest.json" "${{ matrix.mads_asset }}" <<'PY'
+          import fnmatch, json, sys
+          with open(sys.argv[1], encoding="utf-8") as f:
+            release = json.load(f)
+          for asset in release["assets"]:
+            if fnmatch.fnmatch(asset["name"], sys.argv[2]):
+              print(asset["url"])
+              break
+          else:
+            raise SystemExit(f"No MADS asset matches {sys.argv[2]}")
+          PY
+          )"
+
+          curl -fL \
+            -H "Accept: application/octet-stream" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "User-Agent: mads-onnx-ci" \
+            "$asset_url" \
+            -o "$RUNNER_TEMP/mads-release/mads.tar.gz"
+
+          tar -xzf "$RUNNER_TEMP/mads-release/mads.tar.gz" -C "$RUNNER_TEMP/mads"
+
+          agent_header="$(find "$RUNNER_TEMP/mads" -type f -path '*/include/agent.hpp' -print -quit)"
+          if [ -z "$agent_header" ]; then
+            echo "Could not find MADS headers" >&2; exit 1
+          fi
+
+          mads_root="${agent_header%/include/agent.hpp}"
+          test -f "$mads_root/lib/libMadsCore.so"
+
+          echo "MADS_ROOT=$mads_root" >> "$GITHUB_ENV"
+          echo "$mads_root/bin" >> "$GITHUB_PATH"
+
+      - name: Install MADS on macOS
+        if: runner.os == 'macOS'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/mads-release" "$RUNNER_TEMP/mads"
+          curl -fsSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "User-Agent: mads-onnx-ci" \
+            "https://api.github.com/repos/pbosetti/MADS/releases/latest" \
+            -o "$RUNNER_TEMP/mads-release/latest.json"
+
+          asset_url="$(
+            python3 - "$RUNNER_TEMP/mads-release/latest.json" "${{ matrix.mads_asset }}" <<'PY'
+          import fnmatch, json, sys
+          with open(sys.argv[1], encoding="utf-8") as f:
+            release = json.load(f)
+          for asset in release["assets"]:
+            if fnmatch.fnmatch(asset["name"], sys.argv[2]):
+              print(asset["url"])
+              break
+          else:
+            raise SystemExit(f"No MADS asset matches {sys.argv[2]}")
+          PY
+          )"
+
+          installer="$RUNNER_TEMP/mads-release/mads.sh"
+          curl -fL \
+            -H "Accept: application/octet-stream" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "User-Agent: mads-onnx-ci" \
+            "$asset_url" \
+            -o "$installer"
+
+          sh "$installer" --skip-license --prefix="$RUNNER_TEMP/mads" --exclude-subdir
+
+          agent_header="$(find "$RUNNER_TEMP/mads" -type f -path '*/include/agent.hpp' -print -quit)"
+          if [ -z "$agent_header" ]; then
+            echo "Could not find MADS headers" >&2; exit 1
+          fi
+
+          mads_root="${agent_header%/include/agent.hpp}"
+          test -f "$mads_root/lib/libMadsCore.dylib"
+
+          echo "MADS_ROOT=$mads_root" >> "$GITHUB_ENV"
+          echo "$mads_root/bin" >> "$GITHUB_PATH"
+
+      - name: Install MADS on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\mads-release", "$env:RUNNER_TEMP\mads" | Out-Null
+
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+            "User-Agent" = "mads-onnx-ci"
+          }
+
+          $release = Invoke-RestMethod `
+            -Uri "https://api.github.com/repos/pbosetti/MADS/releases/latest" `
+            -Headers $headers
+          $asset = $release.assets |
+            Where-Object { $_.name -like "${{ matrix.mads_asset }}" } |
+            Select-Object -First 1
+
+          if (-not $asset) {
+            throw "No MADS asset matches ${{ matrix.mads_asset }}"
+          }
+
+          $installer = "$env:RUNNER_TEMP\mads-release\mads.exe"
+          $dlHeaders = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = "application/octet-stream"
+            "X-GitHub-Api-Version" = "2022-11-28"
+            "User-Agent" = "mads-onnx-ci"
+          }
+          Invoke-WebRequest -Uri $asset.url -Headers $dlHeaders -OutFile $installer
+
+          $installRoot = "$env:RUNNER_TEMP\mads"
+          $proc = Start-Process `
+            -FilePath $installer `
+            -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/CURRENTUSER", "/DIR=$installRoot" `
+            -Wait -PassThru
+
+          if ($proc.ExitCode -ne 0) {
+            throw "MADS installer failed with exit code $($proc.ExitCode)"
+          }
+
+          $agentHeader = Get-ChildItem $installRoot -Recurse -Filter agent.hpp |
+            Where-Object { $_.FullName -match '\\include\\agent\.hpp$' } |
+            Select-Object -First 1
+
+          if (-not $agentHeader) {
+            throw "Could not find MADS headers after running installer"
+          }
+
+          $madsRoot = Split-Path (Split-Path $agentHeader.FullName -Parent) -Parent
+          $madsLib = Join-Path $madsRoot "lib\MadsCore.lib"
+          if (-not (Test-Path $madsLib)) {
+            throw "Could not find $madsLib"
+          }
+
+          "MADS_ROOT=$madsRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "$madsRoot\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # ── Determine version from git tag ─────────────────────────────────────
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          raw="$(git describe --tags --match 'v*.*.*' --abbrev=0 2>/dev/null || echo '')"
+          if [[ "$raw" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.1.0" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Configure ─────────────────────────────────────────────────────────
+      - name: Configure (Linux / macOS)
+        if: runner.os != 'Windows'
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$PWD/package" \
+            -DMADS_ROOT="$MADS_ROOT" \
+            -DMADS_INSTALL_AGENT=ON \
+            -DVERSION="${{ steps.version.outputs.version }}"
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            "-DCMAKE_INSTALL_PREFIX=$env:GITHUB_WORKSPACE\package" `
+            "-DMADS_ROOT=$env:MADS_ROOT" `
+            "-DMADS_INSTALL_AGENT=ON" `
+            "-DVERSION=${{ steps.version.outputs.version }}"
+
+      # ── Build ──────────────────────────────────────────────────────────────
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      # ── Package ───────────────────────────────────────────────────────────
+      - name: Package
+        run: cmake --build build --config Release --target package --parallel
+
+      # ── Upload artifact ───────────────────────────────────────────────────
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: onnx-agent-${{ matrix.package }}
+          path: build/*.zip
+          if-no-files-found: error
+
+  # ── Release job ─────────────────────────────────────────────────────────────
+  release:
+    name: Create GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v7
+        with:
+          pattern: onnx-agent-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            release_tag="$GITHUB_REF_NAME"
+            release_title="$GITHUB_REF_NAME"
+            extra_args=(--verify-tag)
+          else
+            safe_ref="$(printf '%s' "$GITHUB_REF_NAME" | tr -c '[:alnum:]._-' '-')"
+            short_sha="${GITHUB_SHA::7}"
+            release_tag="${safe_ref}-${short_sha}"
+            release_title="${GITHUB_REF_NAME} ${short_sha}"
+            extra_args=(--target "$GITHUB_SHA" --prerelease)
+          fi
+
+          gh release create "$release_tag" dist/*.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$release_title" \
+            --generate-notes \
+            "${extra_args[@]}"

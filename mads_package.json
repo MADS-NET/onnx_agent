@@ -1,0 +1,27 @@
+{
+  "name": "onnx_agent",
+  "requirements": {
+    "Common": {
+      "note": ["Requires MADS 2.1.0 or later"]
+    },
+    "Windows": {
+      "note": ["Requires Windows 11 or later"],
+      "commands": []
+    },
+    "Linux": {
+      "note": ["Requires Ubuntu 22.04 or later"],
+      "commands": []
+    },
+    "macOS": {
+      "note": [
+        "Requires macOS 13 or later",
+        "You might need to remove the quarantine protection on the binaries once installed"
+      ],
+      "commands": [
+        "xattr -d com.apple.quarantine $(mads -p)/bin/mads-onnx-filter",
+        "xattr -d com.apple.quarantine $(mads -p)/bin/mads-onnx-source",
+        "xattr -d com.apple.quarantine $(mads -p)/lib/libonnxruntime.dylib"
+      ]
+    }
+  }
+}
