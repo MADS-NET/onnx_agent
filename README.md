@@ -42,7 +42,7 @@ onnx_agent/
 |---|---|
 | C++20 compiler | Clang recommended (LLVM style) |
 | CMake >= 3.28 | Ninja backend preferred |
-| MADS >= 2.1.0 | Discovered automatically via `mads -p` |
+| MADS >= 2.2.0 | Discovered automatically via `mads -p` |
 | ONNX Runtime 1.26.0 | Downloaded automatically by FetchContent |
 | OpenCV 4.x (optional) | Required only for `mads-onnx-source` camera mode |
 
