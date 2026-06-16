@@ -14,8 +14,16 @@
 // rang for coloured warnings (header-only, available via the build system)
 #include <rang.hpp>
 
-// CoreML provider option keys (defines kCoremlProviderOption_* constants)
+// CoreML provider option keys (defines kCoremlProviderOption_* constants).
+// This header ships only in the macOS ONNX Runtime package; on Linux/Windows
+// it is absent, so include it conditionally and fall back to the literal key.
+// The CoreML EP branch only executes when CoreMLExecutionProvider is actually
+// available (macOS), so the literal is never used at runtime off-Apple.
+#if __has_include(<coreml_provider_factory.h>)
 #include <coreml_provider_factory.h>
+#else
+#define kCoremlProviderOption_MLComputeUnits "MLComputeUnits"
+#endif
 
 namespace Onnx {
 
