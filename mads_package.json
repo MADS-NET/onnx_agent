@@ -8,13 +8,20 @@
       ]
     },
     "Windows": {
-      "note": ["Requires Windows 11 or later"],
+      "note": [
+        "Requires Windows 11 or later",
+        "GPU acceleration via DirectML is available on any DirectX 12 capable GPU (discrete or integrated). Set execution_provider = directml in mads.ini [agents] to enable; CPU is the default and always works."
+      ],
       "commands": [
         "winget install OpenCV.OpenCV"
       ]
     },
     "Linux": {
-      "note": ["Requires Ubuntu 22.04 or later"],
+      "note": [
+        "Requires Ubuntu 22.04 or later",
+        "The package ships a GPU-capable ONNX Runtime core (built against CUDA 12) that runs on CPU by default — no NVIDIA driver or CUDA Toolkit is required for normal use.",
+        "To enable NVIDIA GPU (CUDA) inference: (1) install the NVIDIA CUDA Toolkit 12.x and cuDNN 9.x on the host, then (2) run scripts/enable-cuda.sh (see the project repository) to download and install the CUDA provider sidecar into $(mads -p)/lib. Set execution_provider = cuda in mads.ini [agents] once the sidecar is in place."
+      ],
       "commands": [
         "sudo apt install libopencv-dev"
       ]
@@ -22,6 +29,7 @@
     "macOS": {
       "note": [
         "Requires macOS 13 or later",
+        "GPU acceleration via Apple CoreML (ANE / GPU) is available out of the box. Set execution_provider = coreml (or auto) in mads.ini [agents] to enable; CPU is the default.",
         "You might need to remove the quarantine protection on the binaries once installed"
       ],
       "commands": [

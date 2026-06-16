@@ -39,6 +39,39 @@ namespace fs = std::filesystem;
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
+/**
+ * @brief Build an Onnx::SessionConfig from CLI parsed options and/or an INI
+ *        settings JSON.  CLI values take precedence over INI values which in
+ *        turn take precedence over the struct defaults.
+ *
+ * @param parsed    The parsed CLI result.
+ * @param settings  The agent's settings JSON (may be an empty object).
+ */
+static Onnx::SessionConfig
+build_session_config(const cxxopts::ParseResult &parsed, const json &settings) {
+  Onnx::SessionConfig cfg;
+  // INI fallbacks
+  if (settings.contains("execution_provider"))
+    cfg.execution_provider = settings["execution_provider"].get<std::string>();
+  if (settings.contains("intra_op_threads"))
+    cfg.intra_op_threads = settings["intra_op_threads"].get<int>();
+  if (settings.contains("inter_op_threads"))
+    cfg.inter_op_threads = settings["inter_op_threads"].get<int>();
+  if (settings.contains("gpu_device_id"))
+    cfg.gpu_device_id = settings["gpu_device_id"].get<int>();
+  // CLI overrides
+  if (parsed.count("execution-provider"))
+    cfg.execution_provider =
+        parsed["execution-provider"].as<std::string>();
+  if (parsed.count("threads"))
+    cfg.intra_op_threads = parsed["threads"].as<int>();
+  if (parsed.count("inter-threads"))
+    cfg.inter_op_threads = parsed["inter-threads"].as<int>();
+  if (parsed.count("gpu-device"))
+    cfg.gpu_device_id = parsed["gpu-device"].as<int>();
+  return cfg;
+}
+
 /** @brief Print tensor metadata in human-readable form. */
 static void print_tensor_list(const std::string &label,
                               const std::vector<Onnx::TensorInfo> &tensors) {
@@ -193,7 +226,20 @@ int main(int argc, char *argv[]) {
      "JSON file to use as model input for --test instead of dummy data. "
      "The file must map tensor names to {shape, data, dtype} objects "
      "matching the project tensor<->JSON schema.",
-     cxxopts::value<fs::path>());
+     cxxopts::value<fs::path>())
+    ("ep,execution-provider",
+     "Execution provider: cpu (default), coreml, cuda, directml, webgpu, auto "
+     "(overrides execution_provider INI setting)",
+     cxxopts::value<std::string>())
+    ("threads",
+     "Intra-op thread count (0 = ORT default; overrides intra_op_threads INI)",
+     cxxopts::value<int>())
+    ("inter-threads",
+     "Inter-op thread count (0 = ORT default; overrides inter_op_threads INI)",
+     cxxopts::value<int>())
+    ("gpu-device",
+     "GPU device index for CUDA/DirectML (overrides gpu_device_id INI setting)",
+     cxxopts::value<int>());
   // clang-format on
 
   auto &parsed = agent.parse_options(argc, argv);
@@ -250,10 +296,12 @@ int main(int argc, char *argv[]) {
       return EXIT_FAILURE;
     }
 
-    // Load model
+    // Load model (offline: settings JSON may be empty)
+    const Onnx::SessionConfig offline_cfg =
+        build_session_config(parsed, json::object());
     std::unique_ptr<Onnx::OnnxModel> model;
     try {
-      model = std::make_unique<Onnx::OnnxModel>(model_path);
+      model = std::make_unique<Onnx::OnnxModel>(model_path, offline_cfg);
     } catch (const std::exception &e) {
       std::cerr << fg::red << "Error loading model: " << e.what() << "\n"
                 << fg::reset;
@@ -262,7 +310,13 @@ int main(int argc, char *argv[]) {
 
     if (want_inspect) {
       std::cout << style::bold << "Model: " << style::reset
-                << model_path.string() << "\n\n";
+                << model_path.string() << "\n"
+                << "Active provider:  " << model->active_provider() << "\n"
+                << "Intra-op threads: "
+                << (offline_cfg.intra_op_threads == 0
+                        ? "ORT default"
+                        : std::to_string(offline_cfg.intra_op_threads))
+                << "\n\n";
       print_tensor_list("Inputs", model->input_info());
       std::cout << "\n";
       print_tensor_list("Outputs", model->output_info());
@@ -341,9 +395,10 @@ int main(int argc, char *argv[]) {
   }
 
   // Load model
+  const Onnx::SessionConfig online_cfg = build_session_config(parsed, settings);
   std::unique_ptr<Onnx::OnnxModel> model;
   try {
-    model = std::make_unique<Onnx::OnnxModel>(model_path);
+    model = std::make_unique<Onnx::OnnxModel>(model_path, online_cfg);
   } catch (const std::exception &e) {
     std::cerr << fg::red << "Error loading model: " << e.what() << "\n"
               << fg::reset;
@@ -365,6 +420,13 @@ int main(int argc, char *argv[]) {
   agent.info();
 
   std::cout << "  model path:     " << style::bold << model_path.string()
+            << style::reset << "\n"
+            << "  EP (active):    " << style::bold << model->active_provider()
+            << style::reset << "\n"
+            << "  intra threads:  " << style::bold
+            << (online_cfg.intra_op_threads == 0
+                    ? "ORT default"
+                    : std::to_string(online_cfg.intra_op_threads))
             << style::reset << "\n"
             << "  sub topic(s):   " << style::bold;
   for (const auto &t : sub_topics)

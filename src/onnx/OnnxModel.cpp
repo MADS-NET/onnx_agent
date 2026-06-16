@@ -5,9 +5,17 @@
 
 #include "OnnxModel.hpp"
 
+#include <algorithm>
+#include <iostream>
 #include <numeric>
 #include <stdexcept>
 #include <string>
+
+// rang for coloured warnings (header-only, available via the build system)
+#include <rang.hpp>
+
+// CoreML provider option keys (defines kCoremlProviderOption_* constants)
+#include <coreml_provider_factory.h>
 
 namespace Onnx {
 
@@ -59,9 +67,162 @@ int64_t TensorInfo::element_count() const {
   return n;
 }
 
+// ─── EP selection helper ──────────────────────────────────────────────────────
+
+/// Return true if name appears in the available-providers list (exact match).
+static bool ep_available(const std::vector<std::string> &avail,
+                         const std::string &name) {
+  return std::find(avail.begin(), avail.end(), name) != avail.end();
+}
+
+/// Lowercase a copy of s.
+static std::string to_lower(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return s;
+}
+
+void OnnxModel::_apply_ep(Ort::SessionOptions &opts,
+                          const SessionConfig &config) {
+  const auto avail = Ort::GetAvailableProviders();
+  const std::string req = to_lower(config.execution_provider);
+
+  // Helper: print a yellow warning and fall back to CPU.
+  auto warn_fallback = [&](const std::string &requested,
+                           const std::string &reason) {
+    std::cerr << rang::fg::yellow
+              << "[OnnxModel] Warning: execution provider '" << requested
+              << "' " << reason << "; falling back to CPU.\n"
+              << rang::fg::reset;
+    _active_provider = "CPU";
+  };
+
+  if (req == "cpu") {
+    _active_provider = "CPU";
+    return; // CPU is always the implicit fallback — nothing to append.
+  }
+
+  if (req == "coreml") {
+    const std::string ep_name = "CoreMLExecutionProvider";
+    if (!ep_available(avail, ep_name)) {
+      warn_fallback("coreml", "is not available in this ONNX Runtime build");
+      return;
+    }
+    try {
+      opts.AppendExecutionProvider(
+          "CoreML",
+          {{kCoremlProviderOption_MLComputeUnits, "ALL"}});
+      _active_provider = "CoreML";
+    } catch (const Ort::Exception &e) {
+      warn_fallback("coreml", std::string("threw: ") + e.what());
+    }
+    return;
+  }
+
+  if (req == "webgpu") {
+    const std::string ep_name = "WebGpuExecutionProvider";
+    if (!ep_available(avail, ep_name)) {
+      warn_fallback("webgpu", "is not available in this ONNX Runtime build");
+      return;
+    }
+    try {
+      opts.AppendExecutionProvider("WebGPU", {});
+      _active_provider = "WebGPU";
+    } catch (const Ort::Exception &e) {
+      warn_fallback("webgpu", std::string("threw: ") + e.what());
+    }
+    return;
+  }
+
+  if (req == "cuda") {
+    const std::string ep_name = "CUDAExecutionProvider";
+    if (!ep_available(avail, ep_name)) {
+      warn_fallback("cuda", "is not available in this ONNX Runtime build");
+      return;
+    }
+    try {
+      // Use the V2 API (does not require the legacy C symbol that is absent
+      // from CPU-only / CoreML-only dylibs).
+      OrtCUDAProviderOptionsV2 *cuda_opts = nullptr;
+      Ort::ThrowOnError(
+          Ort::GetApi().CreateCUDAProviderOptions(&cuda_opts));
+      // device_id is a string option in the V2 API. Keep the string alive.
+      const std::string device_id_str = std::to_string(config.gpu_device_id);
+      const char *keys[]   = {"device_id"};
+      const char *values[] = {device_id_str.c_str()};
+      Ort::ThrowOnError(Ort::GetApi().UpdateCUDAProviderOptions(
+          cuda_opts, keys, values, 1));
+      opts.AppendExecutionProvider_CUDA_V2(*cuda_opts);
+      Ort::GetApi().ReleaseCUDAProviderOptions(cuda_opts);
+      _active_provider = "CUDA";
+    } catch (const Ort::Exception &e) {
+      warn_fallback("cuda", std::string("threw: ") + e.what());
+    }
+    return;
+  }
+
+  if (req == "directml") {
+    const std::string ep_name = "DmlExecutionProvider";
+    if (!ep_available(avail, ep_name)) {
+      warn_fallback("directml",
+                    "is not available in this ONNX Runtime build");
+      return;
+    }
+    try {
+      // DirectML via the generic string-key API (avoids the DML-specific C
+      // symbol that is absent from non-Windows / non-DML dylibs).
+      opts.AppendExecutionProvider(
+          "DML",
+          {{"device_id", std::to_string(config.gpu_device_id)}});
+      _active_provider = "DirectML";
+    } catch (const Ort::Exception &e) {
+      warn_fallback("directml", std::string("threw: ") + e.what());
+    }
+    return;
+  }
+
+  if (req == "auto") {
+    // Platform-aware priority order:
+    //   macOS   : CoreML > WebGPU > CPU
+    //   Linux   : CUDA   > WebGPU > CPU
+    //   Windows : DirectML > CUDA > WebGPU > CPU
+    const std::vector<std::pair<std::string, std::string>> priority = {
+        {"CoreMLExecutionProvider",  "coreml"},
+        {"CUDAExecutionProvider",    "cuda"},
+        {"DmlExecutionProvider",     "directml"},
+        {"WebGpuExecutionProvider",  "webgpu"},
+    };
+
+    for (const auto &[ep_key, ep_alias] : priority) {
+      if (ep_available(avail, ep_key)) {
+        // Re-enter via a sub-config so we reuse the same logic.
+        SessionConfig sub = config;
+        sub.execution_provider = ep_alias;
+        _apply_ep(opts, sub);
+        return;
+      }
+    }
+    // Nothing available beyond CPU — that is fine.
+    _active_provider = "CPU";
+    return;
+  }
+
+  // Unknown provider name
+  std::cerr << rang::fg::yellow << "[OnnxModel] Warning: unknown provider '"
+            << config.execution_provider
+            << "'; falling back to CPU. Valid values: cpu, coreml, cuda, "
+               "directml, webgpu, auto.\n"
+            << rang::fg::reset;
+  _active_provider = "CPU";
+}
+
 // ─── OnnxModel ────────────────────────────────────────────────────────────────
 
 OnnxModel::OnnxModel(const std::filesystem::path &path)
+    : OnnxModel(path, SessionConfig{}) {}
+
+OnnxModel::OnnxModel(const std::filesystem::path &path,
+                     const SessionConfig &config)
     : _path(path),
       _env(ORT_LOGGING_LEVEL_WARNING, "OnnxModel"),
       _session(nullptr) {
@@ -70,8 +231,20 @@ OnnxModel::OnnxModel(const std::filesystem::path &path)
   }
 
   Ort::SessionOptions opts;
-  opts.SetIntraOpNumThreads(1);
+
+  // Thread settings — only call the setter when the user explicitly asks for
+  // a specific count; otherwise leave ORT's default (all available cores).
+  if (config.intra_op_threads > 0) {
+    opts.SetIntraOpNumThreads(config.intra_op_threads);
+  }
+  if (config.inter_op_threads > 0) {
+    opts.SetInterOpNumThreads(config.inter_op_threads);
+  }
+
   opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+
+  // Execution provider selection (sets _active_provider).
+  _apply_ep(opts, config);
 
 #if defined(_WIN32)
   // Windows: wstring path

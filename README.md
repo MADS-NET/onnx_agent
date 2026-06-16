@@ -103,7 +103,179 @@ anywhere and run.
 | `MADS_ROOT` | auto | Path to MADS installation prefix |
 | `MADS_INSTALL_AGENT` | `OFF` | Install agents + ORT lib (required for `package`) |
 | `ORT_VERSION` | `1.26.0` | ONNX Runtime prebuilt version to download |
+| `ONNX_CPU_ONLY` | `OFF` | Fetch the small CPU-only ORT archive (disables GPU EPs) |
 | `VERSION` | from git tag | Package version (override for CI without tags) |
+
+---
+
+## GPU acceleration
+
+Each pre-built package ships a **single, GPU-capable ONNX Runtime** — no
+separate GPU variant is needed.  Inference runs on **CPU by default**; a GPU
+execution provider (EP) is selected by setting `execution_provider` in
+`mads.ini` or passing `--ep <name>`.
+
+### Per-platform EP availability
+
+| Platform | GPU EP | How to enable |
+|---|---|---|
+| macOS arm64 | CoreML (ANE / GPU) | `execution_provider = coreml` or `auto` |
+| Windows x64 | DirectML (any DX12 GPU) | `execution_provider = directml` |
+| Linux x64 | CUDA (NVIDIA) | see below — requires manual sidecar install |
+| Linux aarch64 | CPU only (no gpu build) | — |
+
+CPU is always the fallback if a requested EP is unavailable (a yellow warning
+is printed at startup; inference continues).
+
+### macOS — CoreML
+
+The standard `osx-arm64` ONNX Runtime already includes CoreML and WebGPU EPs.
+No extra steps are needed.
+
+```bash
+mads-onnx-source --ep coreml ...   # ANE / GPU via MLComputeUnitsAll
+mads-onnx-source --ep auto   ...   # auto-picks best available EP
+```
+
+### Windows — DirectML
+
+The Windows package ships `onnxruntime-win-x64-gpu` whose `onnxruntime.dll`
+has DirectML EP compiled in.  DirectML works on any DirectX 12 capable GPU
+(NVIDIA, AMD, Intel) without installing extra drivers.
+
+```ini
+[agents]
+execution_provider = directml
+```
+
+The ~285 MB CUDA sidecar DLLs are **not** included in the package (to keep the
+download small).  CPU and DirectML are always available.
+
+### Linux x64 — CUDA (opt-in)
+
+The Linux package ships the **GPU-capable core lib**
+(`libonnxruntime.so.1.26.0` built against CUDA 12) plus
+`libonnxruntime_providers_shared.so`.  This core lib runs on CPU out of the
+box — it does **not** hard-require `libcudart` at load time; the CUDA provider
+is dlopen'd lazily only when `execution_provider = cuda` is set.
+
+> **Assumption (to validate on a real Linux box):** The ONNX Runtime GPU core
+> lib (`onnxruntime-linux-x64-gpu`) links libcudart as a weak / lazy dependency
+> and does NOT fail to load on hosts without CUDA installed.  This is the
+> standard ORT design; verify with `ldd libonnxruntime.so.1.26.0` on a
+> non-CUDA host if in doubt.
+
+To enable CUDA inference:
+
+1. Install **NVIDIA CUDA Toolkit 12.x** and **cuDNN 9.x** on the host.
+2. Run the sidecar installer:
+   ```bash
+   chmod +x scripts/enable-cuda.sh
+   ./scripts/enable-cuda.sh
+   ```
+   This downloads the `onnxruntime-linux-x64-gpu-1.26.0.tgz` (~215 MB) and
+   extracts `libonnxruntime_providers_cuda.so` into `$(mads -p)/lib`.
+3. Set `execution_provider = cuda` in `mads.ini [agents]`.
+
+The `libonnxruntime_providers_cuda.so` and `libonnxruntime_providers_tensorrt.so`
+sidecars are intentionally **not** included in the base package to keep its
+size comparable to the CPU-only build.
+
+---
+
+## Execution providers and thread settings
+
+All three executables (`mads-onnx-filter`, `mads-onnx-source`,
+`mads-onnx-inspect`) support configurable execution providers (EPs) and thread
+pool sizes.
+
+### Execution providers
+
+| Value | Description |
+|---|---|
+| `cpu` | CPU-only inference (always available, default) |
+| `coreml` | Apple CoreML — uses ANE / GPU via `MLComputeUnitsAll` (macOS/iOS) |
+| `webgpu` | WebGPU EP — experimental |
+| `cuda` | NVIDIA CUDA — requires a GPU ONNX Runtime package (Linux/Windows) |
+| `directml` | DirectX ML — requires a GPU ONNX Runtime package (Windows) |
+| `auto` | Pick the best available EP on the current platform |
+
+**Graceful fallback**: if the requested EP is not compiled into the loaded ONNX
+Runtime library (or its `AppendExecutionProvider` call fails), a yellow warning
+is printed at startup and inference falls back to CPU automatically. The binary
+never hard-fails because a GPU EP is missing.
+
+The active EP (after any fallback) is printed in every agent's startup banner
+and in `mads-onnx-inspect` output so you can confirm which backend ran.
+
+Platform availability (with the macOS arm64 prebuilt in ORT 1.26.0):
+
+```
+Available providers:
+  CoreMLExecutionProvider
+  WebGpuExecutionProvider
+  CPUExecutionProvider
+```
+
+CUDA and DirectML are absent from this dylib — they will fall back to CPU with a
+warning on macOS. A CUDA-capable package would be used on a Linux GPU build.
+
+### Thread settings
+
+| Setting | Default | Description |
+|---|---|---|
+| `intra_op_threads` | `0` | Parallelism within a single operator. 0 = ORT default (all cores). |
+| `inter_op_threads` | `0` | Parallelism across independent graph nodes. 0 = ORT default. |
+
+The old hardcoded value of `1` intra-op thread was a pessimisation. The new
+default of `0` lets ORT use all available cores, which is almost always faster.
+
+### CLI flags (all three executables)
+
+```
+--ep <name>             Execution provider (overrides INI execution_provider)
+--threads <n>           Intra-op thread count (overrides INI intra_op_threads)
+--inter-threads <n>     Inter-op thread count (overrides INI inter_op_threads)
+--gpu-device <idx>      GPU device index for cuda/directml (overrides INI gpu_device_id)
+```
+
+`mads-onnx-inspect` also supports `-ep` / `--ep` as a short alias.
+
+### INI settings (shared `[agents]` section)
+
+```ini
+[agents]
+# Execution provider: cpu | coreml | webgpu | cuda | directml | auto
+execution_provider = "cpu"
+
+# 0 = let ORT choose (recommended); positive value caps the thread pool.
+intra_op_threads = 0
+inter_op_threads = 0
+
+# GPU device index (cuda / directml only).
+gpu_device_id = 0
+```
+
+These can also be overridden per-agent in the `[onnx-filter]` or `[onnx-source]`
+sections.
+
+### Examples
+
+```bash
+# Use CoreML on macOS (fast path via ANE/GPU):
+mads-onnx-source --test -m model.onnx --image cat.jpg --ep coreml
+
+# Let the runtime pick the best available EP:
+mads-onnx-source --test -m model.onnx --image cat.jpg --ep auto
+
+# Use 4 CPU threads explicitly:
+mads-onnx-filter --test -m model.onnx --input data.json --threads 4
+
+# On a machine without CUDA — falls back to CPU with a warning:
+mads-onnx-filter --test -m model.onnx --ep cuda
+# [OnnxModel] Warning: execution provider 'cuda' is not available in this
+# ONNX Runtime build; falling back to CPU.
+```
 
 ---
 
@@ -155,9 +327,13 @@ Prints model I/O metadata without starting the MADS network.
 Usage:
   mads-onnx-inspect [OPTION...]
 
-  -m, --model-path arg  Path to the .onnx model file
-  -j, --json            Emit output as JSON rather than human-readable text
-  -h, --help            Print usage
+  -m, --model-path arg     Path to the .onnx model file
+  -j, --json               Emit output as JSON rather than human-readable text
+      --ep arg             Execution provider (default: cpu)
+      --threads arg        Intra-op thread count (0 = ORT default)
+      --inter-threads arg  Inter-op thread count (0 = ORT default)
+      --gpu-device arg     GPU device index
+  -h, --help               Print usage
 ```
 
 Example:
@@ -211,6 +387,10 @@ Usage:
       --inspect         Print model I/O metadata and example schema, then exit
       --test            Standalone self-test: run inference on dummy/file input
       --input arg       JSON input file for --test (tensor map matching schema)
+      --ep arg          Execution provider (overrides INI execution_provider)
+      --threads arg     Intra-op thread count (0 = ORT default)
+      --inter-threads arg  Inter-op thread count (0 = ORT default)
+      --gpu-device arg  GPU device index
   -n, --name arg        Agent name (overrides INI; sets topic names)
   -h, --help            Print usage
 ```
@@ -273,6 +453,10 @@ Usage:
   -k, --top-k arg       Number of top predictions (default: 5)
       --period arg      Loop period in ms (default: 100)
       --labels arg      Path to labels file (overrides INI labels_path)
+      --ep arg          Execution provider (overrides INI execution_provider)
+      --threads arg     Intra-op thread count (0 = ORT default)
+      --inter-threads arg  Inter-op thread count (0 = ORT default)
+      --gpu-device arg  GPU device index
   -n, --name arg        Agent name
   -h, --help            Print usage
 ```

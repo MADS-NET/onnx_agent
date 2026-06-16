@@ -125,6 +125,33 @@ cmake -Bbuild -GNinja -DMADS_ROOT="C:\path\to\mads" ...
 
 ---
 
+## GPU-capable builds and the ONNX_CPU_ONLY knob
+
+By default (`ONNX_CPU_ONLY=OFF`) CMake downloads a **GPU-capable** ONNX
+Runtime prebuilt for each platform:
+
+| Platform | Archive fetched | GPU EP available |
+|---|---|---|
+| macOS arm64 | `onnxruntime-osx-arm64-<ver>.tgz` | CoreML, WebGPU (already in standard tgz) |
+| Linux x64 | `onnxruntime-linux-x64-gpu-<ver>.tgz` | CUDA (sidecar opt-in via `enable-cuda.sh`) |
+| Linux aarch64 | `onnxruntime-linux-aarch64-<ver>.tgz` | CPU only (no gpu build for generic aarch64) |
+| Windows x64 | `onnxruntime-win-x64-gpu-<ver>.zip` | DirectML (built into `onnxruntime.dll`) |
+
+The large CUDA/TensorRT sidecar libs are **not** installed into the package
+(they are excluded in the CMake install block).  On Linux x64, run
+`scripts/enable-cuda.sh` to fetch and install the CUDA provider sidecar into
+`$(mads -p)/lib` after deployment.
+
+To opt out of the GPU archive (e.g. for a quick developer build where you do
+not need GPU EPs and want a faster/smaller download):
+
+```bash
+cmake -Bbuild -DONNX_CPU_ONLY=ON ...
+```
+
+This falls back to the compact CPU-only archives on Linux x64 and Windows x64.
+macOS and Linux aarch64 are unaffected (they always use the same archive).
+
 ## Overriding ONNX Runtime version
 
 ```bash
@@ -132,8 +159,8 @@ cmake -Bbuild ... -DORT_VERSION=1.26.0
 ```
 
 The prebuilt archive is downloaded from the official ONNX Runtime GitHub
-releases. Supported platforms: `osx-arm64`, `linux-x64`, `linux-aarch64`,
-`win-x64`.
+releases. Supported platforms: `osx-arm64`, `linux-x64`, `linux-x64-gpu`,
+`linux-aarch64`, `win-x64`, `win-x64-gpu`.
 
 ---
 

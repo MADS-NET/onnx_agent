@@ -94,12 +94,17 @@ endif()
 
 # ─── Options ──────────────────────────────────────────────────────────────────
 option(MADS_INSTALL_AGENT "Install the ONNX agents" OFF)
+# When ON, download the small CPU-only ORT prebuilt instead of the GPU-capable
+# one.  Default OFF = each platform fetches its GPU-capable archive (DirectML
+# on Windows via the gpu zip, CUDA-core on Linux x64, CoreML on macOS arm64).
+option(ONNX_CPU_ONLY "Fetch CPU-only ONNX Runtime (no GPU EPs)" OFF)
 
 message(STATUS "Project:              ${PROJECT_NAME} v${PROJECT_VERSION}")
 message(STATUS "MADS_PREFIX:          ${MADS_PREFIX}")
 message(STATUS "CMAKE_BUILD_TYPE:     ${CMAKE_BUILD_TYPE}")
 message(STATUS "CMAKE_INSTALL_PREFIX: ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "MADS_INSTALL_AGENT:   ${MADS_INSTALL_AGENT}")
+message(STATUS "ONNX_CPU_ONLY:        ${ONNX_CPU_ONLY}")
 
 # ─── Dependencies via FetchContent ────────────────────────────────────────────
 include(FetchContent)
@@ -114,32 +119,65 @@ FetchContent_Declare(cxxopts
 
 # ─── ONNX Runtime prebuilt download ───────────────────────────────────────────
 set(ORT_VERSION "1.26.0" CACHE STRING "ONNX Runtime version to download")
+set(ORT_BASE_URL
+  "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}")
 
-# Build the archive name and URL based on platform/arch
+# ── Archive selection ──────────────────────────────────────────────────────────
+# Default (ONNX_CPU_ONLY=OFF): each platform uses a GPU-capable prebuilt so
+# that all GPU execution providers are available at runtime:
+#   macOS arm64  → standard osx-arm64 tgz (CoreML + WebGPU already included)
+#   Linux x64    → linux-x64-gpu tgz (CUDA-capable core; CUDA sidecar excluded
+#                  from the installed package to keep it small — see install
+#                  block below; aarch64 falls back to CPU as no gpu build exists)
+#   Windows x64  → win-x64-gpu zip (DirectML EP is built into onnxruntime.dll;
+#                  only the core DLL + providers_shared are installed, not the
+#                  ~285 MB CUDA/TensorRT sidecars)
+#
+# With ONNX_CPU_ONLY=ON, all platforms fall back to the compact CPU-only builds.
 if(APPLE)
   if(CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64" OR CMAKE_OSX_ARCHITECTURES MATCHES "arm64")
+    # CoreML and WebGPU EPs are already bundled in the standard arm64 tgz.
     set(ORT_ARCHIVE_NAME "onnxruntime-osx-arm64-${ORT_VERSION}.tgz")
   else()
-    # x86_64 – not in latest releases; fall back gracefully; will error if not found
     set(ORT_ARCHIVE_NAME "onnxruntime-osx-x86_64-${ORT_VERSION}.tgz")
   endif()
+  set(ORT_IS_GPU_BUILD FALSE)
 elseif(LINUX)
   if(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
+    # No generic gpu build available for aarch64 (Jetson builds are separate).
+    # Use the CPU-only tgz regardless of ONNX_CPU_ONLY.
     set(ORT_ARCHIVE_NAME "onnxruntime-linux-aarch64-${ORT_VERSION}.tgz")
+    set(ORT_IS_GPU_BUILD FALSE)
   else()
-    set(ORT_ARCHIVE_NAME "onnxruntime-linux-x64-${ORT_VERSION}.tgz")
+    if(ONNX_CPU_ONLY)
+      set(ORT_ARCHIVE_NAME "onnxruntime-linux-x64-${ORT_VERSION}.tgz")
+      set(ORT_IS_GPU_BUILD FALSE)
+    else()
+      # GPU-capable core: includes libonnxruntime_providers_shared.so and the
+      # CUDA/TensorRT sidecars.  Only the core + shared lib are installed into
+      # the package; see the install block below.
+      set(ORT_ARCHIVE_NAME "onnxruntime-linux-x64-gpu-${ORT_VERSION}.tgz")
+      set(ORT_IS_GPU_BUILD TRUE)
+    endif()
   endif()
 elseif(WIN32)
-  set(ORT_ARCHIVE_NAME "onnxruntime-win-x64-${ORT_VERSION}.zip")
+  if(ONNX_CPU_ONLY)
+    set(ORT_ARCHIVE_NAME "onnxruntime-win-x64-${ORT_VERSION}.zip")
+    set(ORT_IS_GPU_BUILD FALSE)
+  else()
+    # GPU zip: onnxruntime.dll has DirectML EP built in (+ CUDA sidecar DLLs
+    # that are NOT installed into the package — see install block below).
+    set(ORT_ARCHIVE_NAME "onnxruntime-win-x64-gpu-${ORT_VERSION}.zip")
+    set(ORT_IS_GPU_BUILD TRUE)
+  endif()
 else()
   message(FATAL_ERROR "Unsupported platform for ONNX Runtime prebuilt download")
 endif()
 
-set(ORT_BASE_URL
-  "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}")
 set(ORT_URL "${ORT_BASE_URL}/${ORT_ARCHIVE_NAME}")
 
 message(STATUS "ORT_URL:              ${ORT_URL}")
+message(STATUS "ORT_IS_GPU_BUILD:     ${ORT_IS_GPU_BUILD}")
 
 FetchContent_Declare(onnxruntime_prebuilt
   URL       "${ORT_URL}"
@@ -216,14 +254,34 @@ elseif(LINUX)
 endif()
 
 # ─── ORT shared-library install (needed for self-contained package) ───────────
-# Installs the runtime shared library into lib/ so that the RPATH
-# (@executable_path/../lib on macOS, $ORIGIN/../lib on Linux) resolves.
+# Installs the runtime shared library into lib/ (or bin/ on Windows) so that
+# the RPATH (@executable_path/../lib on macOS, $ORIGIN/../lib on Linux) and the
+# Windows loader (looks next to the exe / in bin/) can find ORT at runtime.
+#
+# GPU-capable packages install ONLY the small core libs and skip the fat
+# CUDA/TensorRT sidecars, keeping the package size reasonable:
+#   Windows gpu zip: onnxruntime.dll (~15 MB) + providers_shared.dll (~21 KB)
+#     — CUDA/TensorRT sidecars (~285 MB) and .pdb files are NOT installed.
+#   Linux x64 gpu tgz: libonnxruntime.so.<ver> + libonnxruntime_providers_shared.so
+#     — libonnxruntime_providers_cuda.so and *_tensorrt.so NOT installed.
+# The core lib lazy-loads CUDA/TensorRT via dlopen when the provider is
+# requested; on CPU-only hosts those providers simply remain unused.
 if(MADS_INSTALL_AGENT)
   if(WIN32)
-    # On Windows the DLL goes next to the executables (bin/) because that is
-    # where the loader looks on Windows.  The import library is not needed at
-    # runtime.
+    # Core DLL goes next to the executables (Windows loader path).
     install(FILES "${ORT_DLL}" DESTINATION bin)
+    if(ORT_IS_GPU_BUILD)
+      # providers_shared.dll is required by the GPU EP dispatch layer.
+      set(_ORT_PROVIDERS_SHARED_DLL
+        "${ORT_ROOT}/lib/onnxruntime_providers_shared.dll")
+      if(EXISTS "${_ORT_PROVIDERS_SHARED_DLL}")
+        install(FILES "${_ORT_PROVIDERS_SHARED_DLL}" DESTINATION bin)
+      endif()
+      # NOTE: onnxruntime_providers_cuda.dll (~285 MB) and
+      # onnxruntime_providers_tensorrt.dll are intentionally NOT installed.
+      # They can be dropped into bin/ manually to enable CUDA/TensorRT on a
+      # machine that has the CUDA Toolkit installed.
+    endif()
   elseif(APPLE)
     # The binary links against @rpath/libonnxruntime.1.dylib.
     # Install the versioned dylib AND the .1 symlink so the soname resolves.
@@ -243,7 +301,7 @@ if(MADS_INSTALL_AGENT)
       )
     ")
   else()
-    # Linux: install the versioned .so and recreate the .1 soname symlink.
+    # Linux: install the versioned .so and recreate the soname symlinks.
     # The actual file name pattern is libonnxruntime.so.${ORT_VERSION}.
     set(_ORT_LIB_DIR "${ORT_ROOT}/lib")
     install(FILES
@@ -263,6 +321,18 @@ if(MADS_INSTALL_AGENT)
         SYMBOLIC
       )
     ")
+    if(ORT_IS_GPU_BUILD)
+      # providers_shared.so is required by the GPU EP dispatch layer.
+      # Install it alongside the core lib.
+      set(_ORT_PROVIDERS_SHARED_SO
+        "${_ORT_LIB_DIR}/libonnxruntime_providers_shared.so")
+      if(EXISTS "${_ORT_PROVIDERS_SHARED_SO}")
+        install(FILES "${_ORT_PROVIDERS_SHARED_SO}" DESTINATION lib)
+      endif()
+      # NOTE: libonnxruntime_providers_cuda.so and *_tensorrt.so are
+      # intentionally NOT installed — they are the large CUDA sidecars.
+      # Use scripts/enable-cuda.sh to add them on hosts with a CUDA GPU.
+    endif()
   endif()
 endif()
 

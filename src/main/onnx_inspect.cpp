@@ -67,6 +67,18 @@ int main(int argc, char *argv[]) {
     ("m,model-path", "Path to the .onnx model file",
      cxxopts::value<fs::path>())
     ("j,json",       "Emit output as JSON rather than human-readable text")
+    ("ep,execution-provider",
+     "Execution provider: cpu (default), coreml, cuda, directml, webgpu, auto",
+     cxxopts::value<std::string>()->default_value("cpu"))
+    ("threads",
+     "Intra-op thread count (0 = ORT default, uses all available cores)",
+     cxxopts::value<int>()->default_value("0"))
+    ("inter-threads",
+     "Inter-op thread count (0 = ORT default)",
+     cxxopts::value<int>()->default_value("0"))
+    ("gpu-device",
+     "GPU device index (used with --ep cuda or --ep directml)",
+     cxxopts::value<int>()->default_value("0"))
     ("h,help",       "Print usage");
   // clang-format on
 
@@ -88,14 +100,24 @@ int main(int argc, char *argv[]) {
 
   const fs::path model_path = parsed["model-path"].as<fs::path>();
 
+  // ── Session config ─────────────────────────────────────────────────────────
+  Onnx::SessionConfig cfg;
+  cfg.execution_provider = parsed["execution-provider"].as<std::string>();
+  cfg.intra_op_threads   = parsed["threads"].as<int>();
+  cfg.inter_op_threads   = parsed["inter-threads"].as<int>();
+  cfg.gpu_device_id      = parsed["gpu-device"].as<int>();
+
   // ── Load model ─────────────────────────────────────────────────────────────
-  Onnx::OnnxModel model{model_path};
+  Onnx::OnnxModel model{model_path, cfg};
 
   const bool as_json = parsed.count("json") > 0;
 
   if (as_json) {
     json out;
-    out["model"] = model_path.string();
+    out["model"]            = model_path.string();
+    out["active_provider"]  = model.active_provider();
+    out["intra_op_threads"] = cfg.intra_op_threads;
+    out["inter_op_threads"] = cfg.inter_op_threads;
     out["inputs"] = json::array();
     for (const auto &t : model.input_info()) {
       out["inputs"].push_back({{"name", t.name},
@@ -111,7 +133,16 @@ int main(int argc, char *argv[]) {
     out["example_input"] = Onnx::make_input_schema(model.input_info());
     std::cout << out.dump(2) << "\n";
   } else {
-    std::cout << "Model: " << model_path.string() << "\n\n";
+    std::cout << "Model:            " << model_path.string() << "\n"
+              << "Active provider:  " << model.active_provider() << "\n"
+              << "Intra-op threads: "
+              << (cfg.intra_op_threads == 0 ? "ORT default"
+                                            : std::to_string(cfg.intra_op_threads))
+              << "\n"
+              << "Inter-op threads: "
+              << (cfg.inter_op_threads == 0 ? "ORT default"
+                                            : std::to_string(cfg.inter_op_threads))
+              << "\n\n";
     print_tensor_info("Inputs", model.input_info());
     std::cout << "\n";
     print_tensor_info("Outputs", model.output_info());

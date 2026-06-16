@@ -25,23 +25,40 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # ── Linux x86_64 ──────────────────────────────────────────────────────
+          # Fetches onnxruntime-linux-x64-gpu-<ver>.tgz; only the core lib +
+          # providers_shared are packaged (CUDA sidecar excluded for size).
+          # The package runs on CPU by default; run scripts/enable-cuda.sh to
+          # activate CUDA on hosts with NVIDIA GPU + CUDA Toolkit 12.x.
+          # NOTE: CUDA EP cannot be smoke-tested on hosted runners (no GPU).
           - name: Linux x86_64
             os: ubuntu-22.04
             package: linux-x86_64
             mads_asset: "*Linux-x86_64.tar.gz"
             ort_platform: linux-x64
 
+          # ── Linux aarch64 ─────────────────────────────────────────────────────
+          # No generic gpu build available for aarch64; uses the CPU-only tgz.
+          # Jetson / Grace-Hopper users should use the JetPack ORT wheel instead.
           - name: Linux aarch64
             os: ubuntu-22.04-arm
             package: linux-aarch64
             mads_asset: "*Linux-aarch64.tar.gz"
             ort_platform: linux-aarch64
 
+          # ── macOS arm64 ───────────────────────────────────────────────────────
+          # Standard osx-arm64 tgz already includes CoreML + WebGPU EPs.
+          # No change to archive selection needed.
           - name: macOS arm64
             os: macos-15
             package: macos-arm64
             mads_asset: "*Darwin-universal.sh"
 
+          # ── Windows x64 ───────────────────────────────────────────────────────
+          # Fetches onnxruntime-win-x64-gpu-<ver>.zip; DirectML EP is compiled
+          # into onnxruntime.dll. Only onnxruntime.dll + providers_shared.dll
+          # are packaged (~15 MB total); the ~285 MB CUDA sidecar is excluded.
+          # NOTE: DirectML EP cannot be smoke-tested on hosted runners (no GPU).
           - name: Windows x64
             os: windows-2022
             package: windows-x64
@@ -249,6 +266,14 @@ jobs:
           fi
 
       # ── Configure ─────────────────────────────────────────────────────────
+      # ONNX_CPU_ONLY is left at its default (OFF) so each platform downloads
+      # its GPU-capable runtime:
+      #   Linux x64   → onnxruntime-linux-x64-gpu-<ver>.tgz  (~215 MB download,
+      #                  only core + providers_shared packaged; CUDA sidecar omitted)
+      #   Windows x64 → onnxruntime-win-x64-gpu-<ver>.zip    (~286 MB download,
+      #                  only onnxruntime.dll + providers_shared.dll packaged)
+      #   macOS arm64 → onnxruntime-osx-arm64-<ver>.tgz      (unchanged; CoreML built in)
+      #   Linux arm64 → onnxruntime-linux-aarch64-<ver>.tgz  (CPU-only; no gpu build)
       - name: Configure (Linux / macOS)
         if: runner.os != 'Windows'
         env:
@@ -278,6 +303,10 @@ jobs:
         run: cmake --build build --config Release --parallel
 
       # ── Package ───────────────────────────────────────────────────────────
+      # Each platform produces a single ZIP with the GPU-capable runtime.
+      # GPU execution providers (CUDA, DirectML) cannot be smoke-tested on
+      # hosted runners because they have no GPU; they are build-and-package
+      # validated only.  CPU inference always works and is the default.
       - name: Package
         run: cmake --build build --config Release --target package --parallel
 
