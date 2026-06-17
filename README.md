@@ -220,6 +220,40 @@ Available providers:
 CUDA and DirectML are absent from this dylib — they will fall back to CPU with a
 warning on macOS. A CUDA-capable package would be used on a Linux GPU build.
 
+### Benchmark — CoreML vs WebGPU vs CPU (macOS, Apple Silicon)
+
+Using WebGPU as EP might be tempting, for it is cross-platform and available in every standard ONNX Runtime package. But how does it perform against the native CoreML EP on macOS?
+
+We run MobileNetV2-12 inference, single image (`1×3×224×224` float32, batch 1),
+measured with the bundled `onnx-bench` tool (500 timed iterations, 50 warmup,
+ONNX Runtime 1.26.0). Identical output checksums confirm all three backends
+compute the same result.
+
+| Provider | Mean latency | Median | Throughput | Speed-up vs CPU |
+|---|---|---|---|---|
+| **CoreML** | **~1.9 ms** | ~2.0 ms | **~525 inf/s** | **~2.6×** |
+| WebGPU | ~3.0 ms | ~2.9 ms | ~320 inf/s | ~1.6× |
+| CPU (all cores) | ~4.9 ms | ~4.9 ms | ~205 inf/s | 1.0× (baseline) |
+
+**CoreML is the fastest path on macOS** — it maps to the ANE/GPU tuned for
+Apple hardware. WebGPU clearly beats CPU and is valuable as the *one*
+cross-platform GPU EP (Metal/D3D12/Vulkan) shipped in every standard ORT
+package, but trails CoreML here. This validates the `auto` priority order
+(CoreML > WebGPU > CPU on macOS).
+
+> Caveat: these are batch-1 latencies on a small model, where fixed
+> dispatch/launch overhead is significant; larger models or batched inference
+> would likely widen the GPU advantage.
+
+Reproduce with the dev-only benchmark target (not installed, off by default):
+
+```bash
+cmake -Bbuild -GNinja -DCMAKE_BUILD_TYPE=Release -DONNX_BUILD_BENCH=ON
+cmake --build build --target onnx-bench
+./build/src/main/onnx-bench -m examples/imagenet/mobilenetv2-12.onnx \
+    --eps cpu,coreml,webgpu --iters 500 --warmup 50
+```
+
 ### Thread settings
 
 | Setting | Default | Description |

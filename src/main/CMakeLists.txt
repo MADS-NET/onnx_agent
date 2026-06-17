@@ -43,6 +43,27 @@ if(MADS_INSTALL_AGENT)
   install(TARGETS mads-onnx-inspect RUNTIME DESTINATION bin)
 endif()
 
+# ─── onnx-bench (dev-only EP benchmark; not installed) ─────────────────────────
+option(ONNX_BUILD_BENCH "Build the onnx-bench execution-provider benchmark" OFF)
+if(ONNX_BUILD_BENCH)
+  add_executable(onnx-bench onnx_bench.cpp)
+  target_include_directories(onnx-bench
+    PRIVATE
+      "${CMAKE_SOURCE_DIR}/src"
+      "${MADS_PREFIX}/include"
+      "${ORT_INCLUDE_DIR}"
+  )
+  if(WIN32)
+    target_link_libraries(onnx-bench PRIVATE onnxengine cxxopts Ws2_32 bcrypt)
+  else()
+    target_link_libraries(onnx-bench PRIVATE onnxengine cxxopts)
+  endif()
+  set_target_properties(onnx-bench PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+  )
+endif()
+
 # ─── mads-onnx-source ─────────────────────────────────────────────────────────
 # Only built when OpenCV was found by src/source/CMakeLists.txt
 if(OPENCV_FOUND_IN_SOURCE)
