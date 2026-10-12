@@ -29,3 +29,8 @@ compile_commands.json
 
 # CMake
 CMakeUserPresets.json
+
+.DS_Store
+
+imgui.ini
+mads_chat_settings.json
